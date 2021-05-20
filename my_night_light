@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+
+import sys, os
+#from time import sleep
+from threading import Event # use Event().wait(timeout=) iso sleep()
+from math import copysign
+from datetime import datetime
+from astral import Astral
+from collections import namedtuple
+import configparser
+from optparse import OptionParser, OptionGroup
+
+# interface w/ xrandr:
+try:
+    import randr
+except ImportError:
+    try:
+        my_path=os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        my_path=os.path.dirname(sys.argv[0])
+    sys.path.append(os.path.expanduser(my_path))
+    import randr
+
+global screens
+
+global verbose
+verbose=True
+
+global config_file
+config_file = '~/.config/randr.conf'
+
+def parse_commandline():
+    global config_file
+    usage = "%prog [options]"
+    description = \
+        "%prog sets displays brightness and gamma to avoid strained " \
+        "eyes at nighttime. In particular, it sets the gamma more red " \
+        "and less blue (like Night Light), but also less bright. " \
+        "Without options, it sets values depending on the twilight periods "\
+        "relative to sunrise and sunset (as determined by Astral). " \
+        "It is also possible to set (once) displays to a given value, " \
+        "or relative (up/down), or to request current settings value. " \
+        "Default settings are stored in the config file."
+    parser = OptionParser(usage=usage, description=description)
+    parser.add_option("-v", "--verbose", dest="verbose", 
+                      action="store_true",
+                      help="Verbose output")
+    #parser.set_defaults(verbose=False)
+    parser.add_option("-c", "--config", dest="config", type="str",
+                      help="Config file (%default)", metavar="<file>")
+    parser.set_defaults(config=config_file)
+    parser.add_option("-e", "--endpoint", dest="endpoint", type="float",
+                      help="Endpoint brightness/redness at dusk",
+                      metavar="<float>")
+    parser.add_option("-g", "--gamma", dest="gamma", type="str",
+                      help="Endpoint gamma at dusk (overrides endpoint)",
+                      metavar="[r,g,b]")
+    parser.add_option("-s", "--smooth", dest="smooth", 
+                      action="store_true",
+                      help="Transition smootly from current value")
+    parser.set_defaults(smooth=False)
+    
+    # get the options:
+    (options, args) = parser.parse_args()
+    
+    if len(args)>1:
+        print("Error: too many argument(s):", args)
+        sys.exit(-1)
+    elif args:
+        cmd=args[0]
+    else:
+        cmd=None
+        
+    # clean up (recommended):
+    del(parser)
+    return options, cmd
+
+def avg(l):
+    return sum(l)/len(l)
+
+Twilight = namedtuple('Twilight', 
+                      ['is_night', 'is_dawn_twi', 'is_day', 'is_dusk_twi', 
+                       'dawn_len', 'dusk_len', 'twilight_frac', 'time_left'])
+
+def get_twilight(verbose=False):
+    now=datetime.utcnow()
+    sun=Astral().sun_utc(date=now, latitude=52.1341, longitude=5.5932)
+    # strip tzinfo, so we can compare with now()
+    for i in sun: sun[i]=sun[i].replace(tzinfo=None)
+    dawn_len = sun['sunrise']-sun['dawn']
+    dusk_len = sun['dusk']-sun['sunset']
+    twilight={
+        'dawn_len':    dawn_len,
+        'dusk_len':    dusk_len,
+        'is_dawn_twi': now>sun['dawn'] and now<sun['sunrise']+dawn_len,
+        'is_dusk_twi': now<sun['dusk'] and now>sun['sunset']-dusk_len,
+        'is_night':    now<sun['dawn'] or now>sun['sunset']+dusk_len,
+        'is_day':      now>sun['sunrise']+dawn_len and now<sun['sunset']-dusk_len
+        }
+    if   twilight['is_night']:    
+        twilight['twilight_frac']=1
+        twilight['time_left']=sun['dawn']-now
+    elif twilight['is_dawn_twi']: 
+        twilight['twilight_frac']=(now-sun['dawn'])/dawn_len/2.0
+        twilight['time_left']=sun['sunrise']+dawn_len-now
+    elif twilight['is_day']:      
+        twilight['twilight_frac']=0
+        twilight['time_left']=sun['sunset']-dusk_len-now
+    elif twilight['is_dusk_twi']: 
+        twilight['twilight_frac']=(now-sun['sunset']+dusk_len)/dusk_len/2.0
+        twilight['time_left']=sun['dusk']-now
+    else:
+        print('Error: neither night, dawn, day or dusk')
+    
+    if(verbose):
+        print('now', now)
+        print('dawn', sun['dawn'], now>sun['dawn'])
+        print('rise', sun['sunrise'], now>sun['sunrise'])
+        print('set', sun['sunset'], now>sun['sunset'])
+        print('dusk', sun['dusk'], now>sun['dusk'])
+        print('dawn len', dawn_len)
+        print('dusk len', dusk_len)
+        print('is night', twilight['is_night'])
+        print('is dawn twilight', twilight['is_dawn_twi'])
+        print('is day', twilight['is_day'])
+        print('is dusk twilight', twilight['is_dusk_twi'])
+        print('time left', twilight['time_left'])
+    
+    return Twilight(**twilight)
+
+def my_range(start, stop=None, step=1, include_end=False):
+    """ Provide range for float values. 
+    (This should be a darn python internal!)
+    """
+    if stop==None:
+        stop=start
+        start=0
+    nsteps=int((stop-start)/step)
+    if include_end: nsteps+=1
+    return (start+i*step for i in range(nsteps))
+
+def get_current_value(screens):
+    """ Read xrandr screen details and extract bright/gamma values. 
+    """
+    try:
+        brightnesses=[float(screen.details['Brightness']) 
+                      for screen in screens]
+    except KeyError:
+        for s in screens: print(s.details)
+        sys.exit()
+    gammas=[screen.details['Gamma'] for screen in screens]
+    red_gammas=[float(g.split(':')[0]) for g in gammas]
+    blue_gammas=[float(g.split(':')[2]) for g in gammas]
+    value=avg(brightnesses+red_gammas+[1/r for r in blue_gammas])
+    
+    return value
+
+def set_screens(screens, value):
+    """ set screen brightness and gamma/night light values (redness)
+    """
+      
+    randr.set_all_brightness(screens, value)
+    randr.set_all_gamma(screens, (1.0/value, 1.0, value) )
+    randr.apply_all_settings(screens)
+
+def set_smooth(screens, curr_value, value, step=0.01):
+    """ Smoothly transition settings by step from curr_value to value.
+    """
+    # make sure step goes the right direction:
+    if (value-curr_value)*step<0: 
+        step=-step
+    
+    for val in my_range(curr_value, value, step):
+        set_screens(screens, val)
+
+global timestamp
+timestamp=datetime.fromtimestamp(0) # long ago (start of epoch)
+def set_twilight(details=False):
+    global screens
+    # first check if last update was long ago, so we need to smooth    
+    global timestamp # keep track of when last adjustment was
+    now=datetime.now()
+    delta=(now-timestamp).total_seconds()
+    if delta>min_wait*3: # more than 5*10 seconds
+        # get updated values, as they may have changed as well
+        screens = randr.enabled_screens(details=True)
+        curr_value = get_current_value(screens)
+    else:
+        curr_value = None
+    # store current timestamp for next time
+    timestamp=now
+    
+    twilight=get_twilight(details)
+    
+    value = 1.0-twilight.twilight_frac*endpoint
+    
+    print("Twilight fraction", twilight.twilight_frac, "value", value)
+    
+    if curr_value!=None: # set smoothly, increments of 0.01 in value:
+        set_smooth(screens, curr_value, value)
+    set_screens(screens, value)
+        
+    if twilight.is_dawn_twi or twilight.is_dusk_twi:
+        interval = 10 # seconds
+    else:
+        interval = twilight.time_left.total_seconds()
+        
+    return interval
+    
+
+def config_get_safe(conf, conf_get, key, fallback='NOTSET'):
+    try:
+        if fallback=='NOTSET':
+            return conf_get(key)
+        else:
+            return conf_get(key, fallback=fallback)
+    except ValueError:
+        if conf: val=conf.get(key)
+        else: val='<unknown>'
+        print(f'Config error: invalid value \'{val}\' for \'{key}\'')
+    if fallback=='NOTSET':
+        return None
+    else:
+        return fallback
+        
+
+if __name__ == "__main__":
+    
+    global min_wait
+    options, cmd = parse_commandline()
+    
+    config_file = options.config
+    
+    cfg = configparser.ConfigParser()
+    cfg.read(os.path.expanduser(config_file))
+    cfgdef=cfg['DEFAULT']
+    endpoint = config_get_safe(cfgdef, cfgdef.getfloat, 
+                               'endpoint', fallback=0.5)
+    gamma    = cfgdef.get('gamma')
+    min_wait = config_get_safe(cfgdef, cfgdef.getint, 
+                               'wait', fallback=10)
+    verbose  = config_get_safe(cfgdef, cfgdef.getboolean, 
+                               'verbose', fallback=verbose)
+    
+    if options.verbose!=None:  verbose =options.verbose
+    if options.endpoint!=None: endpoint=options.endpoint
+    if options.gamma!=None:    gamma   =options.gamma
+    
+    if verbose: print('Verbose output')
+    print('Gamma/redness endpoint', endpoint)
+    if gamma: print('NOT IMPLEMENTED! Gamma endpoint', gamma)
+    print('Time between updates during twilight', min_wait)
+    
+    screens = randr.enabled_screens()
+    print(" ".join(s.name for s in screens))
+
+    if cmd:
+        value=None
+        # if arguments, set night light value once
+        if(verbose):print("Command", cmd)
+        try:
+            val = float(cmd)
+        except ValueError:
+            screens = randr.enabled_screens(details=True)
+            value = get_current_value(screens)
+    
+            if cmd=='get':
+                print('Current value:', value)
+                sys.exit()
+            elif cmd=='up':
+                val = value+0.1
+            elif cmd=='down':
+                val = value-0.02
+            val=max(0.0,min(val,1.0))
+        
+        print('Set value', val)
+        if options.smooth:
+            # make sure we have a value to smooth from:
+            if value==None: 
+                if len(screens[0].details)==0:
+                    # get screen details
+                    screens = randr.enabled_screens(details=True)
+                value = get_current_value(screens)
+            set_smooth(screens, value, val)
+        else:
+            set_screens(screens, val)
+        
+        sys.exit()
+
+    # if we're here, no arguments, so run automatic based on sun:
+    set_twilight(True)
+    
+    while True:
+        interval = set_twilight()
+        wait=max(min_wait, interval)
+        if(verbose):print('Waiting', wait)
+        Event().wait(timeout=wait)
+    # runs 500 steps in 44 seconds, so 0.088s per step.
+    
+
+#last line
