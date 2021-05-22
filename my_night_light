@@ -194,7 +194,10 @@ def set_twilight(details=False):
     
     value = 1.0-twilight.twilight_frac*endpoint
     
-    print("Twilight fraction", twilight.twilight_frac, "value", value)
+    if   twilight.is_night: print("Waiting for sunrise")
+    elif twilight.is_day:   print("Waiting for sunset")
+    else:
+        print("Twilight fraction", twilight.twilight_frac, "value", value)
     
     if curr_value!=None: # set smoothly, increments of 0.01 in value:
         set_smooth(screens, curr_value, value)
@@ -293,7 +296,8 @@ if __name__ == "__main__":
     while True:
         interval = set_twilight()
         wait=max(min_wait, interval)
-        if(verbose):print('Waiting', wait)
+        if(verbose):
+            print('Waiting', wait)
         Event().wait(timeout=wait)
     # runs 500 steps in 44 seconds, so 0.088s per step.
     
