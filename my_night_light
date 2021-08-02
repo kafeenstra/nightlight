@@ -173,38 +173,27 @@ def set_smooth(screens, curr_value, value, step=0.01):
     for val in my_range(curr_value, value, step):
         set_screens(screens, val)
 
-global timestamp
-timestamp=datetime.fromtimestamp(0) # long ago (start of epoch)
 def set_twilight(details=False):
     global screens
-    # first check if last update was long ago, so we need to smooth    
-    global timestamp # keep track of when last adjustment was
-    now=datetime.now()
-    delta=(now-timestamp).total_seconds()
-    if delta>min_wait*3: # more than 5*10 seconds
-        # get updated values, as they may have changed as well
-        screens = randr.enabled_screens(details=True)
-        curr_value = get_current_value(screens)
-    else:
-        curr_value = None
-    # store current timestamp for next time
-    timestamp=now
+    # get updated values, as they may have changed
+    screens = randr.enabled_screens(details=True)
+    curr_value = get_current_value(screens)
     
     twilight=get_twilight(details)
     
-    value = 1.0-twilight.twilight_frac*endpoint
+    # this may need tweaking; now relative to curr_value.
+    # but not sure how this works out...
+    value = curr_value-twilight.twilight_frac*endpoint
     
     if   twilight.is_night: print("Waiting for sunrise")
     elif twilight.is_day:   print("Waiting for sunset")
     else:
         print("Twilight fraction", twilight.twilight_frac, "value", value)
-    
-    if curr_value!=None: # set smoothly, increments of 0.01 in value:
-        set_smooth(screens, curr_value, value)
-    set_screens(screens, value)
+
+    set_smooth(screens, curr_value, value)
         
     if twilight.is_dawn_twi or twilight.is_dusk_twi:
-        interval = 10 # seconds
+        interval = min_wait # default 10 seconds
     else:
         interval = twilight.time_left.total_seconds()
         
