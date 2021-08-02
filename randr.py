@@ -291,7 +291,11 @@ def str_to_pos(s):
 def exec_cmd(cmd):
     # throws exception CalledProcessError
     if(debug>1):print("Cmd:", cmd)
-    s = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+    try:
+        s = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+    except Exception as e:
+        print(e)
+        return []
     try:
         s = s.decode()
     except AttributeError:
