@@ -31,7 +31,7 @@ config_file = '~/.config/randr.conf'
 
 def parse_commandline():
     global config_file
-    usage = "%prog [options]"
+    usage = "%prog [<value>|up|down|get] [options]"
     description = \
         "%prog sets displays brightness and gamma to avoid strained " \
         "eyes at nighttime. In particular, it sets the gamma more red " \
@@ -39,8 +39,8 @@ def parse_commandline():
         "Without options, it sets values depending on the twilight periods "\
         "relative to sunrise and sunset (as determined by Astral). " \
         "It is also possible to set (once) displays to a given value, " \
-        "or relative (up/down), or to request current settings value. " \
-        "Default settings are stored in the config file."
+        "or relative (up/down), or to request (get) current settings value. " \
+        "Default settings are read from the config file."
     parser = OptionParser(usage=usage, description=description)
     parser.add_option("-v", "--verbose", dest="verbose", 
                       action="store_true",
